@@ -1,25 +1,31 @@
-from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect, WebSocketException
+from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect, WebSocketException, Request
 from contextlib import asynccontextmanager
 from pydantic import BaseModel
 from datetime import datetime
 import asyncpg
 import asyncio
+import logging
 
 # Store active WebSocket connections for each device
 subscriptions = {}
 
-async def get_db_connection():
+logging.basicConfig(level=logging.INFO)
+
+async def get_db_connection(retry_interval=5):
 	"""Establish a connection to the PostgreSQL database."""
-	try:
-		return await asyncpg.connect(
-			user='postgres',
-			password='spark',
-			database='postgres',
-			host='localhost',
-			port=5432
-		)
-	except asyncpg.exceptions.CannotConnectNowError as e:
-		raise HTTPException(status_code=500, detail=f"Database connection failed: {str(e)}")
+	while True:
+		try:
+			return await asyncpg.connect(
+				user='postgres',
+				password='spark',
+				database='spark',
+				host='localhost',
+				port=5432
+			)
+		except Exception as e:
+			print(f"Database connection failed: {str(e)}")
+			print("Retrying in 5 seconds...")
+			await asyncio.sleep(retry_interval)
 
 
 @asynccontextmanager
@@ -47,7 +53,7 @@ async def lifespan(app: FastAPI):
 
 
 # Create FastAPI app with lifespan context
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(lifespan=lifespan, root_path="/spark")
 
 
 @app.websocket("/ws/{device_id}")
@@ -110,7 +116,7 @@ async def handle_device_data_update(db, pid, channel, payload):
 
 async def fetch_device_data(device_id: str, db):
 	"""Fetch all data for a specific device from the database."""
-	query = "SELECT * FROM device_data WHERE device_id = $1 ORDER BY recorded_at DESC"
+	query = "SELECT * FROM device_data WHERE device_id = $1 ORDER BY recorded_at DESC LIMIT 800"
 	rows = await db.fetch(query, device_id)
 
 	result = [dict(row) for row in rows]
@@ -165,3 +171,16 @@ async def get_data(db=Depends(get_db_connection)):
 		return {"data": result}
 	except Exception as e:
 		return {"status": "failed", "error": str(e)}
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+	print("Incoming request detected!")
+	try:
+		body = await request.body()
+		logging.info(f"Received request: {request.method} {request.url}\nHeaders: {request.headers}\nBody: {body.decode() if body else 'No Body'}")
+	except Exception as e:
+		logging.error(f"Error logging request: {e}")
+
+	response = await call_next(request)
+	return response
