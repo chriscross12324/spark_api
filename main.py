@@ -1,10 +1,12 @@
 from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect, WebSocketException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from pydantic import BaseModel
 from datetime import datetime
 import asyncpg
 import asyncio
 import logging
+import time
 
 # Store active WebSocket connections for each device
 subscriptions = {}
@@ -55,6 +57,18 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app with lifespan context
 app = FastAPI(lifespan=lifespan, root_path="/spark")
 
+# CORS Middleware
+app.add_middleware(
+	CORSMiddleware,
+	allow_origins=["*"],
+	allow_credentials=True,
+	allow_methods=["*"],
+	allow_headers=["*"],
+)
+
+# Record Start Time for Uptime information
+start_time = time.time()
+
 
 @app.websocket("/ws/{device_id}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str):
@@ -64,7 +78,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 	# Add new WebSocket connection to subscriptions
 	if device_id not in subscriptions:
 		subscriptions[device_id] = []
-	
+
 	subscriptions[device_id].append(websocket)
 
 	try:
@@ -84,7 +98,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 		# Keep connection alive and await incoming messages
 		while True:
 			await websocket.receive_text()
-			
+
 	except WebSocketDisconnect:
 		# Remove disconnected WebSocket and clean up if necessary
 		subscriptions[device_id].remove(websocket)
@@ -93,7 +107,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str):
 	except WebSocketException as e:
 		print(f"WebSocket error for device {device_id}: {e}")
 		await websocket.close()
-	
+
 
 
 async def handle_device_data_update(db, pid, channel, payload):
@@ -120,7 +134,7 @@ async def fetch_device_data(device_id: str, db):
 	rows = await db.fetch(query, device_id)
 
 	result = [dict(row) for row in rows]
-	return result
+	return list(reversed(result))
 
 async def fetch_latest_device_data(device_id: str, db):
 	"""Fetch the latest data for a specific device from the database."""
@@ -152,7 +166,7 @@ async def post_data(data: DeviceData, db=Depends(get_db_connection)):
 	"""
 
 	try:
-		await db.execute(query, data.device_id, data.recorded_at, data.carbon_monoxide_ppm, data.temperature_celcius, 
+		await db.execute(query, data.device_id, data.recorded_at, data.carbon_monoxide_ppm, data.temperature_celcius,
 						data.pm1_ug_m3, data.pm2_5_ug_m3, data.pm4_ug_m3, data.pm10_ug_m3)
 		await db.close()
 		return {"status": "success", "message": "Data inserted into the database"}
@@ -172,6 +186,23 @@ async def get_data(db=Depends(get_db_connection)):
 	except Exception as e:
 		return {"status": "failed", "error": str(e)}
 
+@app.get("/status")
+async def get_api_status():
+	# Calculate Uptime
+	uptime_seconds = time.time() - start_time
+	uptime_hours = uptime_seconds // 3600
+	uptime_minutes = (uptime_seconds % 3600) // 60
+	uptime_seconds = uptime_seconds % 60
+
+	# Get Current Timestamp
+	timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+	return {
+		"status_code": 200,
+		"message": "I'm awake and ready for action!",
+		"uptime": f"{int(uptime_hours)} hours, {int(uptime_minutes)} minutes, {int(uptime_seconds)} seconds",
+		"timestamp": timestamp
+	}
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
